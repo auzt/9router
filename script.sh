@@ -15,32 +15,30 @@ echo "     Pull selesai"
 echo ""
 
 echo ">>> 2. npm install..."
-npm install --prefer-online 2>&1 | tail -3
+npm install --prefer-online
 echo "     Install selesai"
 echo ""
 
 echo ">>> 3. Build Next.js..."
-npm run build 2>&1 | tail -5
+npm run build
 echo "     Build selesai"
 echo ""
 
 echo ">>> 4. Setup CLI app directory..."
 cd "$APP_DIR/cli"
 rm -rf app
-
 cp -r "$APP_DIR/.next/standalone" app
 cp -r "$APP_DIR/.next/static" app/.next/static
 cp -r "$APP_DIR/public" app/public 2>/dev/null
 echo "     CLI app siap"
 echo ""
 
-echo ">>> 5. Restart service..."
-systemctl restart 9router-auzt
-echo "     Restart selesai"
+echo "========================================"
+echo "  Menjalankan 9router-auzt..."
+echo "  Dashboard: http://localhost:20128/dashboard"
+echo "  Tekan Ctrl+C untuk berhenti"
+echo "========================================"
 echo ""
 
-echo "========================================"
-echo "  SELESAI!"
-echo "========================================"
-echo ""
-systemctl status 9router-auzt --no-pager | head -8
+cd "$APP_DIR/cli"
+exec node cli.js --no-browser --log
