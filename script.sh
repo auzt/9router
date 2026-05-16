@@ -10,7 +10,8 @@ echo ""
 
 echo ">>> 1. Git pull dari fork auzt/9router..."
 cd "$APP_DIR"
-git pull origin master
+git fetch origin master
+git reset --hard origin/master
 echo "     Pull selesai"
 echo ""
 
