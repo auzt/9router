@@ -8,11 +8,16 @@ echo "  9Router-auzt Update & Build Script"
 echo "========================================"
 echo ""
 
-echo ">>> 1. Git pull dari fork auzt/9router..."
+echo ">>> 0. Stop service 9router-auzt..."
+sudo systemctl stop 9router-auzt
+echo "     Service stopped"
+echo ""
+
+echo ">>> 1. Git sync dari fork auzt/9router..."
 cd "$APP_DIR"
 git fetch origin master
 git reset --hard origin/master
-echo "     Pull selesai"
+echo "     Sync selesai"
 echo ""
 
 echo ">>> 2. npm install..."
@@ -35,11 +40,11 @@ echo "     CLI app siap"
 echo ""
 
 echo "========================================"
-echo "  Menjalankan 9router-auzt..."
+echo "  Memulai 9router-auzt..."
 echo "  Dashboard: http://localhost:20128/dashboard"
-echo "  Tekan Ctrl+C untuk berhenti"
 echo "========================================"
 echo ""
 
 cd "$APP_DIR/cli"
-exec node cli.js --no-browser --log
+sudo systemctl start 9router-auzt
+echo "     Service started"
