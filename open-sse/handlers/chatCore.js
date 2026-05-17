@@ -27,8 +27,9 @@ import { resolveProxyPoolChain } from "@/lib/network/connectionProxy.js";
  * @param {object} options.modelInfo - { provider, model }
  * @param {object} options.credentials - Provider credentials
  * @param {string} options.sourceFormatOverride - Override detected source format (e.g. "openai-responses")
+ * @param {number} [options.proxyRetryCount] - Max proxy retry attempts (default 3, 0 = disabled)
  */
-export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, cavemanEnabled, cavemanLevel, sourceFormatOverride, providerThinking }) {
+export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, cavemanEnabled, cavemanLevel, sourceFormatOverride, providerThinking, proxyRetryCount }) {
   const { provider, model } = modelInfo;
   const requestStartTime = Date.now();
 
@@ -146,12 +147,12 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   // Resolves proxy pools from connection config (providerSpecificData)
   // or settings-based providerStrategies (for noAuth providers like OpenCode Free).
   // Cycles through pools with exponential backoff (2s, 4s, max 15s):
-  //   3 pools → pool1 → 2s → pool2 → 4s → pool3
-  //   2 pools → pool1 → 2s → pool2 → 4s → pool1
+  //   proxyRetryCount=3, 3 pools → pool1 → 2s → pool2 → 4s → pool3
   //   No pools → 1 attempt (legacy proxy or direct)
   // ──────────────────────────────────────────────────────────────
+  const PROXY_RETRY_MAX = (typeof proxyRetryCount === "number" && proxyRetryCount > 0) ? proxyRetryCount : 3;
   const proxyChain = await resolveProxyPoolChain(credentials?.providerSpecificData, provider);
-  const maxAttempts = proxyChain.length > 0 ? 3 : 1;
+  const maxAttempts = proxyChain.length > 0 ? PROXY_RETRY_MAX : 1;
 
   /**
    * Build proxyOptions for a given attempt index.
@@ -218,7 +219,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
 
   logProxyInfo(proxyOptions, 0, maxAttempts);
 
-  // Circular retry loop: max 3 attempts, exponential backoff between retries
+  // Circular retry loop: max PROXY_RETRY_MAX attempts, exponential backoff between retries
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     if (attempt > 0) {
       proxyOptions = buildProxyOptionsForAttempt(attempt);

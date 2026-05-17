@@ -200,6 +200,8 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     // Use shared chatCore
     const chatSettings = await getSettings();
     const providerThinking = (chatSettings.providerThinking || {})[provider] || null;
+    const providerStrategyCfg = (chatSettings.providerStrategies || {})[provider] || {};
+    const proxyRetryCount = providerStrategyCfg.proxyRetryCount != null ? Number(providerStrategyCfg.proxyRetryCount) : 3;
     const result = await handleChatCore({
       body: { ...body, model: `${provider}/${model}` },
       modelInfo: { provider, model },
@@ -214,6 +216,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       cavemanEnabled: !!chatSettings.cavemanEnabled,
       cavemanLevel: chatSettings.cavemanLevel || "full",
       providerThinking,
+      proxyRetryCount,
       // Detect source format by endpoint + body
       sourceFormatOverride: request?.url ? detectFormatByEndpoint(new URL(request.url).pathname, body) : null,
       onCredentialsRefreshed: async (newCreds) => {

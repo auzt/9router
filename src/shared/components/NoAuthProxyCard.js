@@ -12,6 +12,7 @@ export default function NoAuthProxyCard({ providerId }) {
   const [proxyPools, setProxyPools] = useState([]);
   const [proxyPoolId, setProxyPoolId] = useState(NONE_PROXY_POOL_VALUE);
   const [fallbackPoolIds, setFallbackPoolIds] = useState([]);
+  const [proxyRetryCount, setProxyRetryCount] = useState(3);
   const [saving, setSaving] = useState(false);
   const [savedFlash, setSavedFlash] = useState(false);
 
@@ -26,26 +27,32 @@ export default function NoAuthProxyCard({ providerId }) {
       const override = (settingsData.providerStrategies || {})[providerId] || {};
       setProxyPoolId(override.proxyPoolId || NONE_PROXY_POOL_VALUE);
       setFallbackPoolIds(Array.isArray(override.proxyPoolFallbackIds) ? override.proxyPoolFallbackIds : []);
+      setProxyRetryCount(override.proxyRetryCount != null ? Number(override.proxyRetryCount) : 3);
     }).catch(() => {});
     return () => { cancelled = true; };
   }, [providerId]);
 
   const handleChange = async (newPrimary) => {
-    // Remove the new primary from fallbacks if it was there
     const cleanFallbacks = newPrimary !== NONE_PROXY_POOL_VALUE
       ? fallbackPoolIds.filter(id => id !== newPrimary)
       : fallbackPoolIds;
-    await saveConfig(newPrimary, cleanFallbacks);
+    await saveConfig(newPrimary, cleanFallbacks, proxyRetryCount);
   };
 
   const handleToggleFallback = async (poolId) => {
     const newFallbacks = fallbackPoolIds.includes(poolId)
       ? fallbackPoolIds.filter(id => id !== poolId)
       : [...fallbackPoolIds, poolId];
-    await saveConfig(proxyPoolId, newFallbacks);
+    await saveConfig(proxyPoolId, newFallbacks, proxyRetryCount);
   };
 
-  const saveConfig = async (primary, fallbacks) => {
+  const handleRetryChange = async (value) => {
+    const count = Math.max(1, Math.min(10, Number(value) || 3));
+    setProxyRetryCount(count);
+    await saveConfig(proxyPoolId, fallbackPoolIds, count);
+  };
+
+  const saveConfig = async (primary, fallbacks, retryCount) => {
     setSaving(true);
     try {
       const res = await fetch("/api/settings", { cache: "no-store" });
@@ -58,6 +65,9 @@ export default function NoAuthProxyCard({ providerId }) {
 
       if (fallbacks.length > 0) override.proxyPoolFallbackIds = fallbacks;
       else delete override.proxyPoolFallbackIds;
+
+      if (retryCount !== 3) override.proxyRetryCount = retryCount;
+      else delete override.proxyRetryCount;
 
       const updated = { ...current };
       if (Object.keys(override).length === 0) delete updated[providerId];
@@ -145,11 +155,30 @@ export default function NoAuthProxyCard({ providerId }) {
               </label>
             ))}
           </div>
-          {fallbackPoolIds.length > 0 && (
-            <p className="text-[11px] text-text-muted">
-              ⚡ {fallbackPoolIds.length} fallback pool{fallbackPoolIds.length > 1 ? "s" : ""}. Retry on 429 (up to 3 attempts, cycling).
-            </p>
-          )}
+        </div>
+      )}
+
+      {proxyPoolId !== NONE_PROXY_POOL_VALUE && (
+        <div>
+          <label className="text-xs text-text-muted mb-1.5 block">
+            Max Retry Count <span className="text-text-muted/60">(1-10, default 3)</span>
+          </label>
+          <input
+            type="number"
+            min={1}
+            max={10}
+            value={proxyRetryCount}
+            onChange={(e) => {
+              const v = e.target.value;
+              setProxyRetryCount(Math.max(1, Math.min(10, Number(v) || 3)));
+            }}
+            onBlur={() => handleRetryChange(proxyRetryCount)}
+            className="w-24 px-3 py-2 text-sm border border-border rounded-lg bg-background focus:outline-none focus:border-primary"
+            disabled={saving}
+          />
+          <p className="text-[11px] text-text-muted mt-1">
+            ⚡ {proxyRetryCount} attempt{proxyRetryCount > 1 ? "s" : ""} per request. Backoff: 2s, 4s, max 15s.
+          </p>
         </div>
       )}
     </Card>
