@@ -142,16 +142,16 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     log, provider, model
   });
 
-  // ── Proxy Pool Fallback Chain (with circular retry) ──
+  // ── Proxy Pool Fallback Chain (with circular retry + delay) ──
   // Resolves proxy pools from connection config (providerSpecificData)
   // or settings-based providerStrategies (for noAuth providers like OpenCode Free).
-  // Cycles through pools with max 3 attempts (wrapping around for smaller pools):
-  //   3 pools → pool1, pool2, pool3
-  //   2 pools → pool1, pool2, pool1
+  // Cycles through pools with exponential backoff (2s, 4s, max 15s):
+  //   3 pools → pool1 → 2s → pool2 → 4s → pool3
+  //   2 pools → pool1 → 2s → pool2 → 4s → pool1
   //   No pools → 1 attempt (legacy proxy or direct)
-  const MAX_PROXY_RETRIES = 3;
+  // ──────────────────────────────────────────────────────────────
   const proxyChain = await resolveProxyPoolChain(credentials?.providerSpecificData, provider);
-  const maxAttempts = proxyChain.length > 0 ? MAX_PROXY_RETRIES : 1;
+  const maxAttempts = proxyChain.length > 0 ? 3 : 1;
 
   /**
    * Build proxyOptions for a given attempt index.
@@ -181,9 +181,13 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     };
   }
 
+  /** Exponential backoff delay: 2s, 4s, max 15s */
+  function backoffDelay(attempt) {
+    return Math.min(2000 * Math.pow(2, attempt), 15000);
+  }
+
   function logProxyInfo(opts, attempt, total) {
     const poolId = opts._poolId || "none";
-
     if (proxyChain.length > 0) {
       log?.info?.("PROXY", `${provider.toUpperCase()} | ${model} | attempt ${attempt + 1}/${total} | pool=${poolId}`);
     }
@@ -211,11 +215,10 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   let proxyOptions = buildProxyOptionsForAttempt(0);
   let providerResponse, providerUrl, providerHeaders, finalBody;
   let executeError = null;
-  let is429Fallback = false;
 
   logProxyInfo(proxyOptions, 0, maxAttempts);
 
-  // Circular retry loop: max 3 attempts, cycles through pools wrapping around
+  // Circular retry loop: max 3 attempts, exponential backoff between retries
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     if (attempt > 0) {
       proxyOptions = buildProxyOptionsForAttempt(attempt);
@@ -230,25 +233,27 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
       finalBody = result.transformedBody;
       reqLogger.logTargetRequest(providerUrl, providerHeaders, finalBody);
 
-      // Rate limited (429) and we have more attempts? Try next pool (circular).
+      // Rate limited (429) and we have more attempts? Try next pool (circular), with backoff.
       if (providerResponse.status === 429 && attempt < maxAttempts - 1) {
         const poolId = proxyOptions._poolId || "unknown";
         const nextPoolId = buildProxyOptionsForAttempt(attempt + 1)._poolId || "unknown";
-        log?.warn?.("PROXY", `${provider.toUpperCase()} | ${model} | rate limited via pool=${poolId}, retry ${attempt + 2}/${maxAttempts} | next=${nextPoolId}`);
+        const delayMs = backoffDelay(attempt);
+        log?.warn?.("PROXY", `${provider.toUpperCase()} | ${model} | rate limited via pool=${poolId}, waiting ${(delayMs / 1000).toFixed(1)}s then retry ${attempt + 2}/${maxAttempts} | next=${nextPoolId}`);
         executeError = null;
-        is429Fallback = true;
+        await new Promise(resolve => setTimeout(resolve, delayMs));
         continue;
       }
 
       // Non-429 response or last attempt — break to normal handling
       executeError = null;
-      is429Fallback = false;
       break;
     } catch (error) {
       if (attempt < maxAttempts - 1 && proxyChain.length > 0) {
         const poolId = proxyOptions._poolId || "unknown";
-        log?.warn?.("PROXY", `${provider.toUpperCase()} | ${model} | pool=${poolId} error: ${error.message}, retry ${attempt + 2}/${maxAttempts}`);
+        const delayMs = backoffDelay(attempt);
+        log?.warn?.("PROXY", `${provider.toUpperCase()} | ${model} | pool=${poolId} error: ${error.message}, waiting ${(delayMs / 1000).toFixed(1)}s then retry ${attempt + 2}/${maxAttempts}`);
         executeError = null;
+        await new Promise(resolve => setTimeout(resolve, delayMs));
         continue;
       }
       // Last attempt or no pools — fall through to error handling
