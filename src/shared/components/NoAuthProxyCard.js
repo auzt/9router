@@ -11,6 +11,7 @@ const NONE_PROXY_POOL_VALUE = "__none__";
 export default function NoAuthProxyCard({ providerId }) {
   const [proxyPools, setProxyPools] = useState([]);
   const [proxyPoolId, setProxyPoolId] = useState(NONE_PROXY_POOL_VALUE);
+  const [fallbackPoolIds, setFallbackPoolIds] = useState([]);
   const [saving, setSaving] = useState(false);
   const [savedFlash, setSavedFlash] = useState(false);
 
@@ -24,36 +25,62 @@ export default function NoAuthProxyCard({ providerId }) {
       setProxyPools(poolData.proxyPools || []);
       const override = (settingsData.providerStrategies || {})[providerId] || {};
       setProxyPoolId(override.proxyPoolId || NONE_PROXY_POOL_VALUE);
+      setFallbackPoolIds(Array.isArray(override.proxyPoolFallbackIds) ? override.proxyPoolFallbackIds : []);
     }).catch(() => {});
     return () => { cancelled = true; };
   }, [providerId]);
 
-  const handleChange = async (newValue) => {
-    setProxyPoolId(newValue);
+  const handleChange = async (newPrimary) => {
+    // Remove the new primary from fallbacks if it was there
+    const cleanFallbacks = newPrimary !== NONE_PROXY_POOL_VALUE
+      ? fallbackPoolIds.filter(id => id !== newPrimary)
+      : fallbackPoolIds;
+    await saveConfig(newPrimary, cleanFallbacks);
+  };
+
+  const handleToggleFallback = async (poolId) => {
+    const newFallbacks = fallbackPoolIds.includes(poolId)
+      ? fallbackPoolIds.filter(id => id !== poolId)
+      : [...fallbackPoolIds, poolId];
+    await saveConfig(proxyPoolId, newFallbacks);
+  };
+
+  const saveConfig = async (primary, fallbacks) => {
     setSaving(true);
     try {
       const res = await fetch("/api/settings", { cache: "no-store" });
       const data = res.ok ? await res.json() : {};
       const current = data.providerStrategies || {};
       const override = { ...(current[providerId] || {}) };
-      if (newValue === NONE_PROXY_POOL_VALUE) delete override.proxyPoolId;
-      else override.proxyPoolId = newValue;
+
+      if (primary === NONE_PROXY_POOL_VALUE) delete override.proxyPoolId;
+      else override.proxyPoolId = primary;
+
+      if (fallbacks.length > 0) override.proxyPoolFallbackIds = fallbacks;
+      else delete override.proxyPoolFallbackIds;
+
       const updated = { ...current };
       if (Object.keys(override).length === 0) delete updated[providerId];
       else updated[providerId] = override;
+
       await fetch("/api/settings", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ providerStrategies: updated }),
       });
+
+      setProxyPoolId(primary);
+      setFallbackPoolIds(fallbacks);
       setSavedFlash(true);
       setTimeout(() => setSavedFlash(false), 1500);
     } catch (e) {
-      console.log("Save proxyPoolId error:", e);
+      console.log("Save proxy config error:", e);
     } finally {
       setSaving(false);
     }
   };
+
+  const fallbackEligiblePools = (proxyPools || []).filter(p => p.id !== proxyPoolId);
 
   return (
     <Card>
@@ -67,16 +94,64 @@ export default function NoAuthProxyCard({ providerId }) {
         </div>
         {savedFlash && <Badge variant="success" size="sm">Saved</Badge>}
       </div>
-      <Select
-        label="Proxy Pool"
-        value={proxyPoolId}
-        onChange={(e) => handleChange(e.target.value)}
-        disabled={saving}
-        options={[
-          { value: NONE_PROXY_POOL_VALUE, label: "None (direct)" },
-          ...proxyPools.map((pool) => ({ value: pool.id, label: pool.name })),
-        ]}
-      />
+
+      <div className="mb-4">
+        <Select
+          label="Primary Proxy Pool"
+          value={proxyPoolId}
+          onChange={(e) => handleChange(e.target.value)}
+          disabled={saving}
+          options={[
+            { value: NONE_PROXY_POOL_VALUE, label: "None (direct)" },
+            ...proxyPools.map((pool) => ({ value: pool.id, label: pool.name })),
+          ]}
+        />
+      </div>
+
+      {proxyPoolId !== NONE_PROXY_POOL_VALUE && fallbackEligiblePools.length > 0 && (
+        <div>
+          <label className="text-xs text-text-muted mb-1.5 block">
+            Fallback Pools <span className="text-text-muted/60">(tried on rate limit)</span>
+          </label>
+          <div className="flex flex-col gap-1 mb-3">
+            {fallbackEligiblePools.map((pool) => (
+              <label
+                key={pool.id}
+                className={`flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer transition-colors ${
+                  fallbackPoolIds.includes(pool.id)
+                    ? "bg-primary/10 border border-primary/30"
+                    : "hover:bg-black/5 dark:hover:bg-white/5 border border-transparent"
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  checked={fallbackPoolIds.includes(pool.id)}
+                  onChange={() => handleToggleFallback(pool.id)}
+                  className="accent-primary"
+                  disabled={saving}
+                />
+                <div className="flex-1 min-w-0">
+                  <span className="text-sm truncate block">{pool.name}</span>
+                  {pool.proxyUrl && (
+                    <code className="text-[10px] font-mono text-text-muted truncate block">
+                      {(() => {
+                        try { const p = new URL(pool.proxyUrl); return `${p.protocol}//${p.hostname}${p.port ? `:${p.port}` : ""}`; }
+                        catch { return pool.proxyUrl; }
+                      })()}
+                    </code>
+                  )}
+                </div>
+                {pool.isActive === false && <Badge variant="error" size="xs">inactive</Badge>}
+              </label>
+            ))}
+          </div>
+          {fallbackPoolIds.length > 0 && (
+            <p className="text-[11px] text-text-muted">
+              ⚡ {fallbackPoolIds.length} fallback pool{fallbackPoolIds.length > 1 ? "s" : ""}. Retry on 429 (up to 3 attempts, cycling).
+            </p>
+          )}
+        </div>
+      )}
     </Card>
   );
 }

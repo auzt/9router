@@ -19,7 +19,6 @@ import { detectClientTool, isNativePassthrough } from "../utils/clientDetector.j
 import { dedupeTools } from "../utils/toolDeduper.js";
 import { injectCaveman } from "../rtk/caveman.js";
 import { compressMessages, formatRtkLog } from "../rtk/index.js";
-import { resolveProxyPoolChain } from "@/lib/network/connectionProxy.js";
 
 /**
  * Core chat handler - shared between SSE and Worker
@@ -142,140 +141,66 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     log, provider, model
   });
 
-  // ── Proxy Pool Fallback Chain (with circular retry) ──
-  // Resolves proxy pools from connection config (providerSpecificData)
-  // or settings-based providerStrategies (for noAuth providers like OpenCode Free).
-  // Cycles through pools with max 3 attempts (wrapping around for smaller pools):
-  //   3 pools → pool1, pool2, pool3
-  //   2 pools → pool1, pool2, pool1
-  //   No pools → 1 attempt (legacy proxy or direct)
-  const MAX_PROXY_RETRIES = 3;
-  const proxyChain = await resolveProxyPoolChain(credentials?.providerSpecificData, provider);
-  const maxAttempts = proxyChain.length > 0 ? MAX_PROXY_RETRIES : 1;
+  const proxyOptions = {
+    connectionProxyEnabled: credentials?.providerSpecificData?.connectionProxyEnabled === true,
+    connectionProxyUrl: credentials?.providerSpecificData?.connectionProxyUrl || "",
+    connectionNoProxy: credentials?.providerSpecificData?.connectionNoProxy || "",
+    vercelRelayUrl: credentials?.providerSpecificData?.vercelRelayUrl || "",
+  };
 
-  /**
-   * Build proxyOptions for a given attempt index.
-   * Cycles through the proxy chain with modulo.
-   */
-  function buildProxyOptionsForAttempt(attemptIdx) {
-    if (proxyChain.length > 0) {
-      const poolIdx = attemptIdx % proxyChain.length;
-      const pc = proxyChain[poolIdx];
-      return {
-        connectionProxyEnabled: pc.connectionProxyEnabled,
-        connectionProxyUrl: pc.connectionProxyUrl || "",
-        connectionNoProxy: pc.connectionNoProxy || "",
-        vercelRelayUrl: pc.vercelRelayUrl || "",
-        _poolId: pc.poolId || "unknown",
-        _poolIdx: poolIdx,
-      };
-    }
-    // Legacy fallback (single proxy from providerSpecificData)
-    return {
-      connectionProxyEnabled: credentials?.providerSpecificData?.connectionProxyEnabled === true,
-      connectionProxyUrl: credentials?.providerSpecificData?.connectionProxyUrl || "",
-      connectionNoProxy: credentials?.providerSpecificData?.connectionNoProxy || "",
-      vercelRelayUrl: credentials?.providerSpecificData?.vercelRelayUrl || "",
-      _poolId: "none",
-      _poolIdx: -1,
-    };
-  }
-
-  function logProxyInfo(opts, attempt, total) {
-    const poolId = opts._poolId || "none";
-
-    if (proxyChain.length > 0) {
-      log?.info?.("PROXY", `${provider.toUpperCase()} | ${model} | attempt ${attempt + 1}/${total} | pool=${poolId}`);
-    }
-
-    if (opts.vercelRelayUrl) {
-      const connectionName = credentials?.connectionName || credentials?.connectionId || "unknown";
-      log?.info?.("PROXY", `${provider.toUpperCase()} | ${model} | conn=${connectionName} | pool=${poolId} | vercel-relay=${opts.vercelRelayUrl}`);
-    } else if (opts.connectionProxyEnabled && opts.connectionProxyUrl) {
-      let maskedProxyUrl = opts.connectionProxyUrl;
-      try {
-        const parsed = new URL(opts.connectionProxyUrl);
-        maskedProxyUrl = `${parsed.protocol}//${parsed.hostname}${parsed.port ? `:${parsed.port}` : ""}`;
-      } catch { maskedProxyUrl = opts.connectionProxyUrl; }
-
-      const connectionName = credentials?.connectionName || credentials?.connectionId || "unknown";
-      log?.info?.("PROXY", `${provider.toUpperCase()} | ${model} | conn=${connectionName} | pool=${poolId} | url=${maskedProxyUrl}`);
-    }
-
-    if (opts.connectionProxyEnabled && opts.connectionNoProxy) {
-      const connectionName = credentials?.connectionName || credentials?.connectionId || "unknown";
-      log?.debug?.("PROXY", `${provider.toUpperCase()} | ${model} | conn=${connectionName} | no_proxy=${opts.connectionNoProxy}`);
-    }
-  }
-
-  let proxyOptions = buildProxyOptionsForAttempt(0);
-  let providerResponse, providerUrl, providerHeaders, finalBody;
-  let executeError = null;
-  let is429Fallback = false;
-
-  logProxyInfo(proxyOptions, 0, maxAttempts);
-
-  // Circular retry loop: max 3 attempts, cycles through pools wrapping around
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    if (attempt > 0) {
-      proxyOptions = buildProxyOptionsForAttempt(attempt);
-      logProxyInfo(proxyOptions, attempt, maxAttempts);
-    }
-
+  if (proxyOptions.vercelRelayUrl) {
+    const connectionName = credentials?.connectionName || credentials?.connectionId || "unknown";
+    const poolId = credentials?.providerSpecificData?.connectionProxyPoolId || "none";
+    log?.info?.("PROXY", `${provider.toUpperCase()} | ${model} | conn=${connectionName} | pool=${poolId} | vercel-relay=${proxyOptions.vercelRelayUrl}`);
+  } else if (proxyOptions.connectionProxyEnabled && proxyOptions.connectionProxyUrl) {
+    let maskedProxyUrl = proxyOptions.connectionProxyUrl;
     try {
-      const result = await executor.execute({ model, body: translatedBody, stream, credentials, signal: streamController.signal, log, proxyOptions });
-      providerResponse = result.response;
-      providerUrl = result.url;
-      providerHeaders = result.headers;
-      finalBody = result.transformedBody;
-      reqLogger.logTargetRequest(providerUrl, providerHeaders, finalBody);
-
-      // Rate limited (429) and we have more attempts? Try next pool (circular).
-      if (providerResponse.status === 429 && attempt < maxAttempts - 1) {
-        const poolId = proxyOptions._poolId || "unknown";
-        const nextPoolId = buildProxyOptionsForAttempt(attempt + 1)._poolId || "unknown";
-        log?.warn?.("PROXY", `${provider.toUpperCase()} | ${model} | rate limited via pool=${poolId}, retry ${attempt + 2}/${maxAttempts} | next=${nextPoolId}`);
-        executeError = null;
-        is429Fallback = true;
-        continue;
-      }
-
-      // Non-429 response or last attempt — break to normal handling
-      executeError = null;
-      is429Fallback = false;
-      break;
-    } catch (error) {
-      if (attempt < maxAttempts - 1 && proxyChain.length > 0) {
-        const poolId = proxyOptions._poolId || "unknown";
-        log?.warn?.("PROXY", `${provider.toUpperCase()} | ${model} | pool=${poolId} error: ${error.message}, retry ${attempt + 2}/${maxAttempts}`);
-        executeError = null;
-        continue;
-      }
-      // Last attempt or no pools — fall through to error handling
-      executeError = error;
-      break;
+      const parsed = new URL(proxyOptions.connectionProxyUrl);
+      const host = parsed.hostname || "";
+      const port = parsed.port ? `:${parsed.port}` : "";
+      const protocol = parsed.protocol || "http:";
+      maskedProxyUrl = `${protocol}//${host}${port}`;
+    } catch {
+      // Keep raw if URL parsing fails
     }
+
+    const poolId = credentials?.providerSpecificData?.connectionProxyPoolId || "none";
+    const connectionName = credentials?.connectionName || credentials?.connectionId || "unknown";
+    log?.info?.("PROXY", `${provider.toUpperCase()} | ${model} | conn=${connectionName} | pool=${poolId} | url=${maskedProxyUrl}`);
   }
 
-  // Handle execute error (from catch, all attempts exhausted)
-  if (executeError) {
+  if (proxyOptions.connectionProxyEnabled && proxyOptions.connectionNoProxy) {
+    const connectionName = credentials?.connectionName || credentials?.connectionId || "unknown";
+    log?.debug?.("PROXY", `${provider.toUpperCase()} | ${model} | conn=${connectionName} | no_proxy=${proxyOptions.connectionNoProxy}`);
+  }
+
+  // Execute request
+  let providerResponse, providerUrl, providerHeaders, finalBody;
+  try {
+    const result = await executor.execute({ model, body: translatedBody, stream, credentials, signal: streamController.signal, log, proxyOptions });
+    providerResponse = result.response;
+    providerUrl = result.url;
+    providerHeaders = result.headers;
+    finalBody = result.transformedBody;
+    reqLogger.logTargetRequest(providerUrl, providerHeaders, finalBody);
+  } catch (error) {
     trackPendingRequest(model, provider, connectionId, false, true);
-    appendRequestLog({ model, provider, connectionId, status: `FAILED ${executeError.name === "AbortError" ? 499 : HTTP_STATUS.BAD_GATEWAY}` }).catch(() => { });
+    appendRequestLog({ model, provider, connectionId, status: `FAILED ${error.name === "AbortError" ? 499 : HTTP_STATUS.BAD_GATEWAY}` }).catch(() => { });
     saveRequestDetail(buildRequestDetail({
       provider, model, connectionId,
       latency: { ttft: 0, total: Date.now() - requestStartTime },
       tokens: { prompt_tokens: 0, completion_tokens: 0 },
       request: extractRequestConfig(body, stream),
       providerRequest: translatedBody || null,
-      response: { error: executeError.message || String(executeError), status: executeError.name === "AbortError" ? 499 : 502, thinking: null },
+      response: { error: error.message || String(error), status: error.name === "AbortError" ? 499 : 502, thinking: null },
       status: "error"
     })).catch(() => { });
 
-    if (executeError.name === "AbortError") {
-      streamController.handleError(executeError);
+    if (error.name === "AbortError") {
+      streamController.handleError(error);
       return createErrorResult(499, "Request aborted");
     }
-    const errMsg = formatProviderError(executeError, provider, model, HTTP_STATUS.BAD_GATEWAY);
+    const errMsg = formatProviderError(error, provider, model, HTTP_STATUS.BAD_GATEWAY);
     console.log(`${COLORS.red}[ERROR] ${errMsg}${COLORS.reset}`);
     return createErrorResult(HTTP_STATUS.BAD_GATEWAY, errMsg);
   }

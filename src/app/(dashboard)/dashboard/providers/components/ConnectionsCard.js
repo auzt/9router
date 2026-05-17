@@ -38,12 +38,17 @@ function ConnectionRow({ connection, proxyPools, isOAuth, isFirst, isLast, onMov
   const proxyPoolMap = new Map((proxyPools || []).map((p) => [p.id, p]));
   const boundProxyPoolId = connection.providerSpecificData?.proxyPoolId || null;
   const boundProxyPool = boundProxyPoolId ? proxyPoolMap.get(boundProxyPoolId) : null;
+  const fallbackPoolIds = Array.isArray(connection.providerSpecificData?.proxyPoolFallbackIds)
+    ? connection.providerSpecificData.proxyPoolFallbackIds
+    : [];
+  const fallbackPools = fallbackPoolIds.map(id => proxyPoolMap.get(id)).filter(Boolean);
   const hasLegacyProxy = connection.providerSpecificData?.connectionProxyEnabled === true && !!connection.providerSpecificData?.connectionProxyUrl;
   const hasAnyProxy = !!boundProxyPoolId || hasLegacyProxy;
+  const hasFallbackProxy = fallbackPoolIds.length > 0;
 
   const proxyDisplayText = boundProxyPool
-    ? `Pool: ${boundProxyPool.name}`
-    : boundProxyPoolId ? `Pool: ${boundProxyPoolId} (inactive/missing)`
+    ? `Pool: ${boundProxyPool.name}${hasFallbackProxy ? ` + ${fallbackPoolIds.length} fallback` : ""}`
+    : boundProxyPoolId ? `Pool: ${boundProxyPoolId} (inactive/missing)${hasFallbackProxy ? ` + ${fallbackPoolIds.length} fallback` : ""}`
     : hasLegacyProxy ? `Legacy: ${connection.providerSpecificData?.connectionProxyUrl}` : "";
 
   let maskedProxyUrl = "";
@@ -122,6 +127,7 @@ function ConnectionRow({ connection, proxyPools, isOAuth, isFirst, isLast, onMov
               {connection.isActive === false ? "disabled" : (effectiveStatus || "Unknown")}
             </Badge>
             {hasAnyProxy && <Badge variant={proxyBadgeVariant} size="sm">Proxy</Badge>}
+            {hasFallbackProxy && <Badge variant="warning" size="sm">Fallback</Badge>}
             {isCooldown && connection.isActive !== false && <CooldownTimer until={modelLockUntil} />}
             {connection.lastError && connection.isActive !== false && (
               <span className="text-xs text-red-500 truncate max-w-[300px]" title={connection.lastError}>{connection.lastError}</span>
@@ -133,6 +139,15 @@ function ConnectionRow({ connection, proxyPools, isOAuth, isFirst, isLast, onMov
               <span className="text-[11px] text-text-muted truncate max-w-[420px]" title={proxyDisplayText}>{proxyDisplayText}</span>
               {maskedProxyUrl && <code className="text-[10px] font-mono bg-black/5 dark:bg-white/5 px-1 py-0.5 rounded text-text-muted">{maskedProxyUrl}</code>}
               {noProxyText && <span className="text-[11px] text-text-muted truncate max-w-[320px]" title={noProxyText}>no_proxy: {noProxyText}</span>}
+              {hasFallbackProxy && (
+                <div className="flex gap-1 flex-wrap">
+                  {fallbackPools.map((pool) => (
+                    <Badge key={pool.id} variant={pool.isActive === false ? "error" : "default"} size="xs">
+                      {pool.name}
+                    </Badge>
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -200,10 +215,12 @@ ConnectionRow.propTypes = {
 // ── AddApiKeyModal ─────────────────────────────────────────────
 function AddApiKeyModal({ isOpen, provider, providerName, proxyPools, onSave, onClose }) {
   const NONE = "__none__";
-  const [formData, setFormData] = useState({ name: "", apiKey: "", priority: 1, proxyPoolId: NONE });
+  const [formData, setFormData] = useState({ name: "", apiKey: "", priority: 1, proxyPoolId: NONE, proxyPoolFallbackIds: [] });
   const [validating, setValidating] = useState(false);
   const [validationResult, setValidationResult] = useState(null);
   const [saving, setSaving] = useState(false);
+
+  const fallbackOptions = (proxyPools || []).filter(p => p.id !== formData.proxyPoolId);
 
   const handleValidate = async () => {
     setValidating(true);
@@ -217,6 +234,15 @@ function AddApiKeyModal({ isOpen, provider, providerName, proxyPools, onSave, on
       setValidationResult(data.valid ? "success" : "failed");
     } catch { setValidationResult("failed"); }
     finally { setValidating(false); }
+  };
+
+  const handleToggleFallback = (poolId) => {
+    setFormData(prev => ({
+      ...prev,
+      proxyPoolFallbackIds: prev.proxyPoolFallbackIds.includes(poolId)
+        ? prev.proxyPoolFallbackIds.filter(id => id !== poolId)
+        : [...prev.proxyPoolFallbackIds, poolId]
+    }));
   };
 
   const handleSubmit = async () => {
@@ -241,6 +267,7 @@ function AddApiKeyModal({ isOpen, provider, providerName, proxyPools, onSave, on
         apiKey: formData.apiKey,
         priority: formData.priority,
         proxyPoolId: formData.proxyPoolId === NONE ? null : formData.proxyPoolId,
+        proxyPoolFallbackIds: formData.proxyPoolFallbackIds.length > 0 ? formData.proxyPoolFallbackIds : null,
         testStatus: isValid ? "active" : "unknown",
       });
     } finally { setSaving(false); }
@@ -253,12 +280,14 @@ function AddApiKeyModal({ isOpen, provider, providerName, proxyPools, onSave, on
       <div className="flex flex-col gap-4">
         <div>
           <label className="text-xs text-text-muted mb-1 block">Name</label>
-          <input className="w-full px-3 py-2 text-sm border border-border rounded-lg bg-background focus:outline-none focus:border-primary" value={formData.name} onChange={(e) => setFormData({ ...formData, name: e.target.value })} placeholder="Production Key" />
+          <input className="w-full px-3 py-2 text-sm border border-border rounded-lg bg-background focus:outline-none focus:border-primary" value={formData.name}
+            onChange={(e) => setFormData({ ...formData, name: e.target.value })} placeholder="Production Key" />
         </div>
         <div className="flex gap-2">
           <div className="flex-1">
             <label className="text-xs text-text-muted mb-1 block">API Key</label>
-            <input type="password" className="w-full px-3 py-2 text-sm border border-border rounded-lg bg-background focus:outline-none focus:border-primary" value={formData.apiKey} onChange={(e) => setFormData({ ...formData, apiKey: e.target.value })} />
+            <input type="password" className="w-full px-3 py-2 text-sm border border-border rounded-lg bg-background focus:outline-none focus:border-primary" value={formData.apiKey}
+              onChange={(e) => setFormData({ ...formData, apiKey: e.target.value })} />
           </div>
           <div className="pt-6">
             <Button onClick={handleValidate} disabled={!formData.apiKey || validating || saving} variant="secondary">
@@ -273,10 +302,77 @@ function AddApiKeyModal({ isOpen, provider, providerName, proxyPools, onSave, on
         )}
         <div>
           <label className="text-xs text-text-muted mb-1 block">Priority</label>
-          <input type="number" className="w-full px-3 py-2 text-sm border border-border rounded-lg bg-background focus:outline-none focus:border-primary" value={formData.priority} onChange={(e) => setFormData({ ...formData, priority: Number.parseInt(e.target.value) || 1 })} />
+          <input type="number" className="w-full px-3 py-2 text-sm border border-border rounded-lg bg-background focus:outline-none focus:border-primary"
+            value={formData.priority}
+            onChange={(e) => setFormData({ ...formData, priority: Number.parseInt(e.target.value) || 1 })} />
         </div>
-        <Select label="Proxy Pool" value={formData.proxyPoolId} onChange={(e) => setFormData({ ...formData, proxyPoolId: e.target.value })}
-          options={[{ value: NONE, label: "None" }, ...(proxyPools || []).map((p) => ({ value: p.id, label: p.name }))]} />
+
+        {/* ── Proxy Pool Configuration ── */}
+        {(proxyPools || []).length > 0 && (
+          <div className="bg-sidebar/50 p-4 rounded-lg border border-accent/20">
+            <h3 className="font-semibold mb-3 text-sm flex items-center gap-2">
+              <span className="material-symbols-outlined text-base">lan</span>
+              Proxy Pools
+            </h3>
+
+            <div className="mb-4">
+              <label className="text-xs text-text-muted mb-1.5 block">
+                Primary Pool <span className="text-text-muted/60">(used first)</span>
+              </label>
+              <Select
+                value={formData.proxyPoolId}
+                onChange={(e) => {
+                  const newPrimary = e.target.value;
+                  setFormData(prev => ({
+                    ...prev,
+                    proxyPoolId: newPrimary,
+                    proxyPoolFallbackIds: newPrimary !== NONE
+                      ? prev.proxyPoolFallbackIds.filter(id => id !== newPrimary)
+                      : prev.proxyPoolFallbackIds
+                  }));
+                }}
+                options={[
+                  { value: NONE, label: "None" },
+                  ...(proxyPools || []).map((p) => ({
+                    value: p.id,
+                    label: `${p.name}${p.isActive === false ? " (inactive)" : ""}`,
+                  })),
+                ]}
+              />
+            </div>
+
+            {formData.proxyPoolId !== NONE && fallbackOptions.length > 0 && (
+              <div>
+                <label className="text-xs text-text-muted mb-1.5 block">
+                  Fallback Pools <span className="text-text-muted/60">(tried on rate limit)</span>
+                </label>
+                <div className="flex flex-col gap-1">
+                  {fallbackOptions.map((pool) => (
+                    <label key={pool.id}
+                      className={`flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer transition-colors
+                        ${formData.proxyPoolFallbackIds.includes(pool.id)
+                          ? "bg-primary/10 border border-primary/30"
+                          : "hover:bg-black/5 dark:hover:bg-white/5 border border-transparent"}`}
+                    >
+                      <input type="checkbox" checked={formData.proxyPoolFallbackIds.includes(pool.id)}
+                        onChange={() => handleToggleFallback(pool.id)} className="accent-primary" />
+                      <div className="flex-1 min-w-0">
+                        <span className="text-sm truncate block">{pool.name}</span>
+                        {pool.proxyUrl && (
+                          <code className="text-[10px] font-mono text-text-muted truncate block">
+                            {(() => { try { const p = new URL(pool.proxyUrl); return `${p.protocol}//${p.hostname}${p.port ? `:${p.port}` : ""}`; } catch { return pool.proxyUrl; } })()}
+                          </code>
+                        )}
+                      </div>
+                      {pool.isActive === false && <Badge variant="error" size="xs">inactive</Badge>}
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
         <div className="flex gap-2">
           <Button onClick={handleSubmit} fullWidth disabled={!formData.name || !formData.apiKey || saving}>
             {saving ? "Saving..." : "Save"}
@@ -381,8 +477,32 @@ export default function ConnectionsCard({ providerId, isOAuth }) {
 
   const handleUpdateProxy = async (connId, proxyPoolId) => {
     try {
-      const res = await fetch(`/api/providers/${connId}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ proxyPoolId: proxyPoolId || null }) });
-      if (res.ok) setConnections((prev) => prev.map((c) => c.id === connId ? { ...c, providerSpecificData: { ...c.providerSpecificData, proxyPoolId: proxyPoolId || null } } : c));
+      // Preserve existing fallback pools when changing primary
+      const conn = connections.find(c => c.id === connId);
+      const existingFallbacks = conn?.providerSpecificData?.proxyPoolFallbackIds || [];
+      // Filter out new primary from fallbacks
+      const filteredFallbacks = proxyPoolId
+        ? (Array.isArray(existingFallbacks) ? existingFallbacks.filter(id => id !== proxyPoolId) : [])
+        : [];
+      const body = {
+        proxyPoolId: proxyPoolId || null,
+        proxyPoolFallbackIds: filteredFallbacks.length > 0 ? filteredFallbacks : null,
+      };
+      const res = await fetch(`/api/providers/${connId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      });
+      if (res.ok) {
+        setConnections((prev) => prev.map((c) => c.id === connId ? {
+          ...c,
+          providerSpecificData: {
+            ...c.providerSpecificData,
+            proxyPoolId: proxyPoolId || null,
+            proxyPoolFallbackIds: filteredFallbacks.length > 0 ? filteredFallbacks : undefined,
+          }
+        } : c));
+      }
     } catch (e) { console.log("proxy error:", e); }
   };
 
@@ -395,7 +515,11 @@ export default function ConnectionsCard({ providerId, isOAuth }) {
 
   const handleUpdateConnection = async (formData) => {
     try {
-      const res = await fetch(`/api/providers/${selectedConnection.id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(formData) });
+      const res = await fetch(`/api/providers/${selectedConnection.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(formData)
+      });
       if (res.ok) { await fetch_(); setShowEditModal(false); }
     } catch (e) { console.log("update connection error:", e); }
   };

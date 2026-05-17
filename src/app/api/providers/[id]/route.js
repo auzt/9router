@@ -55,6 +55,20 @@ async function normalizeProxyPoolUpdate(proxyPoolIdInput) {
   return { hasProxyPoolField: true, proxyPoolId };
 }
 
+function normalizeProxyPoolFallbackIds(input) {
+  if (input === undefined) return { hasField: false, ids: null };
+
+  if (input === null || input === "" || (Array.isArray(input) && input.length === 0)) {
+    return { hasField: true, ids: null };
+  }
+
+  const ids = Array.isArray(input)
+    ? input.map(s => String(s).trim()).filter(Boolean)
+    : String(input).split(",").map(s => s.trim()).filter(Boolean);
+
+  return { hasField: true, ids };
+}
+
 function shouldMergeProviderSpecificData(existing, incoming, hasLegacyProxy, hasProxyPoolField) {
   return existing !== undefined || incoming !== undefined || hasLegacyProxy || hasProxyPoolField;
 }
@@ -116,6 +130,8 @@ export async function PUT(request, { params }) {
       return NextResponse.json({ error: proxyPoolResult.error }, { status: 400 });
     }
 
+    const fallbackResult = normalizeProxyPoolFallbackIds(body.proxyPoolFallbackIds);
+
     const updateData = {};
     if (name !== undefined) updateData.name = name;
     if (priority !== undefined) updateData.priority = priority;
@@ -133,7 +149,7 @@ export async function PUT(request, { params }) {
         providerSpecificData,
         proxyConfig.hasAnyProxyField,
         proxyPoolResult.hasProxyPoolField
-      )
+      ) || fallbackResult.hasField
     ) {
       updateData.providerSpecificData = {
         ...(existing.providerSpecificData || {}),
@@ -151,6 +167,21 @@ export async function PUT(request, { params }) {
           delete updateData.providerSpecificData.proxyPoolId;
         } else {
           updateData.providerSpecificData.proxyPoolId = proxyPoolResult.proxyPoolId;
+        }
+      }
+
+      if (fallbackResult.hasField) {
+        if (fallbackResult.ids && fallbackResult.ids.length > 0) {
+          // Filter out duplicates with primary proxyPoolId
+          const primaryId = proxyPoolResult.hasProxyPoolField ? proxyPoolResult.proxyPoolId : updateData.providerSpecificData.proxyPoolId;
+          const filtered = fallbackResult.ids.filter(id => id !== primaryId);
+          if (filtered.length > 0) {
+            updateData.providerSpecificData.proxyPoolFallbackIds = filtered;
+          } else {
+            delete updateData.providerSpecificData.proxyPoolFallbackIds;
+          }
+        } else {
+          delete updateData.providerSpecificData.proxyPoolFallbackIds;
         }
       }
     }

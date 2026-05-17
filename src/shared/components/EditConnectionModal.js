@@ -6,6 +6,7 @@ import Modal from "@/shared/components/Modal";
 import Input from "@/shared/components/Input";
 import Button from "@/shared/components/Button";
 import Badge from "@/shared/components/Badge";
+import Select from "@/shared/components/Select";
 import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider } from "@/shared/constants/providers";
 
 export default function EditConnectionModal({ isOpen, connection, proxyPools, onSave, onClose }) {
@@ -26,6 +27,12 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
   const [validating, setValidating] = useState(false);
   const [validationResult, setValidationResult] = useState(null);
   const [saving, setSaving] = useState(false);
+
+  // Proxy pool state
+  const [primaryPoolId, setPrimaryPoolId] = useState("__none__");
+  const [fallbackPoolIds, setFallbackPoolIds] = useState([]);
+
+  const NONE = "__none__";
 
   useEffect(() => {
     if (connection) {
@@ -48,6 +55,11 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
       }
       setTestResult(null);
       setValidationResult(null);
+
+      // Load proxy pool config
+      const psd = connection.providerSpecificData || {};
+      setPrimaryPoolId(psd.proxyPoolId || NONE);
+      setFallbackPoolIds(Array.isArray(psd.proxyPoolFallbackIds) ? psd.proxyPoolFallbackIds : []);
     }
   }, [connection]);
 
@@ -57,6 +69,15 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
   const isCompatible = connection
     ? (isOpenAICompatibleProvider(connection.provider) || isAnthropicCompatibleProvider(connection.provider))
     : false;
+
+  // Filter out primary pool from available fallback options
+  const fallbackOptions = (proxyPools || []).filter(p => p.id !== primaryPoolId);
+
+  const handleToggleFallback = (poolId) => {
+    setFallbackPoolIds(prev =>
+      prev.includes(poolId) ? prev.filter(id => id !== poolId) : [...prev, poolId]
+    );
+  };
 
   const handleTest = async () => {
     if (!connection?.provider) return;
@@ -137,7 +158,7 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
           updates.lastErrorAt = null;
         }
       }
-      
+
       // Add Azure-specific data if this is an Azure connection
       if (isAzure) {
         updates.providerSpecificData = {
@@ -150,7 +171,11 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
       if (isCloudflareAi) {
         updates.providerSpecificData = { accountId: cloudflareData.accountId };
       }
-      
+
+      // Add proxy pool configuration
+      updates.proxyPoolId = primaryPoolId === NONE ? null : primaryPoolId;
+      updates.proxyPoolFallbackIds = fallbackPoolIds.length > 0 ? fallbackPoolIds : null;
+
       await onSave(updates);
     } finally {
       setSaving(false);
@@ -256,6 +281,99 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
           </div>
         )}
 
+        {/* ── Proxy Pool Configuration ── */}
+        {(proxyPools || []).length > 0 && (
+          <div className="bg-sidebar/50 p-4 rounded-lg border border-accent/20">
+            <h3 className="font-semibold mb-3 text-sm flex items-center gap-2">
+              <span className="material-symbols-outlined text-base">lan</span>
+              Proxy Pools
+            </h3>
+
+            {/* Primary Proxy Pool */}
+            <div className="mb-4">
+              <label className="text-xs text-text-muted mb-1.5 block">
+                Primary Pool <span className="text-text-muted/60">(used first)</span>
+              </label>
+              <Select
+                value={primaryPoolId}
+                onChange={(e) => {
+                  const newPrimary = e.target.value;
+                  setPrimaryPoolId(newPrimary);
+                  // Remove from fallbacks if it was selected there
+                  if (newPrimary !== NONE) {
+                    setFallbackPoolIds(prev => prev.filter(id => id !== newPrimary));
+                  }
+                }}
+                options={[
+                  { value: NONE, label: "None" },
+                  ...(proxyPools || []).map((p) => ({
+                    value: p.id,
+                    label: `${p.name}${p.isActive === false ? " (inactive)" : ""}`,
+                  })),
+                ]}
+              />
+            </div>
+
+            {/* Fallback Proxy Pools */}
+            {primaryPoolId !== NONE && (
+              <div>
+                <label className="text-xs text-text-muted mb-1.5 block">
+                  Fallback Pools <span className="text-text-muted/60">(tried in order on rate limit)</span>
+                </label>
+                {fallbackOptions.length === 0 ? (
+                  <p className="text-xs text-text-muted/60 italic">
+                    No other proxy pools available to use as fallback.
+                  </p>
+                ) : (
+                  <div className="flex flex-col gap-1">
+                    {fallbackOptions.map((pool) => (
+                      <label
+                        key={pool.id}
+                        className={`flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer transition-colors
+                          ${fallbackPoolIds.includes(pool.id)
+                            ? "bg-primary/10 border border-primary/30"
+                            : "hover:bg-black/5 dark:hover:bg-white/5 border border-transparent"}`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={fallbackPoolIds.includes(pool.id)}
+                          onChange={() => handleToggleFallback(pool.id)}
+                          className="accent-primary"
+                        />
+                        <div className="flex-1 min-w-0">
+                          <span className="text-sm truncate block">{pool.name}</span>
+                          {pool.proxyUrl && (
+                            <code className="text-[10px] font-mono text-text-muted truncate block">
+                              {(() => {
+                                try {
+                                  const p = new URL(pool.proxyUrl);
+                                  return `${p.protocol}//${p.hostname}${p.port ? `:${p.port}` : ""}`;
+                                } catch { return pool.proxyUrl; }
+                              })()}
+                            </code>
+                          )}
+                        </div>
+                        {pool.isActive === false && (
+                          <Badge variant="error" size="xs">inactive</Badge>
+                        )}
+                        <span className="material-symbols-outlined text-sm text-text-muted">
+                          {fallbackPoolIds.includes(pool.id) ? "check_circle" : "radio_button_unchecked"}
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                )}
+                {fallbackPoolIds.length > 0 && (
+                  <p className="text-[11px] text-text-muted mt-2">
+                    ⚡ {fallbackPoolIds.length} fallback pool{fallbackPoolIds.length > 1 ? "s" : ""} configured.
+                    Auto-retried on HTTP 429 (rate limit).
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
         <div className="flex gap-2">
           <Button onClick={handleSubmit} fullWidth disabled={saving}>{saving ? "Saving..." : "Save"}</Button>
           <Button onClick={onClose} variant="ghost" fullWidth>Cancel</Button>
@@ -279,8 +397,9 @@ EditConnectionModal.propTypes = {
   proxyPools: PropTypes.arrayOf(PropTypes.shape({
     id: PropTypes.string,
     name: PropTypes.string,
+    proxyUrl: PropTypes.string,
+    isActive: PropTypes.bool,
   })),
   onSave: PropTypes.func.isRequired,
   onClose: PropTypes.func.isRequired,
 };
-

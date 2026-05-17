@@ -28,6 +28,18 @@ function normalizeProxyConfig(body = {}) {
   };
 }
 
+function normalizeProxyPoolFallbackIds(input) {
+  if (input === undefined || input === null || input === "" || (Array.isArray(input) && input.length === 0)) {
+    return { fallbackIds: null };
+  }
+
+  const ids = Array.isArray(input)
+    ? input.map(s => String(s).trim()).filter(Boolean)
+    : String(input).split(",").map(s => s.trim()).filter(Boolean);
+
+  return { fallbackIds: ids.length > 0 ? ids : null };
+}
+
 async function normalizeProxyPoolId(proxyPoolId) {
   if (proxyPoolId === undefined || proxyPoolId === null || proxyPoolId === "" || proxyPoolId === "__none__") {
     return { proxyPoolId: null };
@@ -100,6 +112,8 @@ export async function POST(request) {
     }
     const proxyPoolId = proxyPoolResult.proxyPoolId;
 
+    const fallbackResult = normalizeProxyPoolFallbackIds(body.proxyPoolFallbackIds);
+
     // Validation
     const isWebCookieProvider = !!WEB_COOKIE_PROVIDERS[provider];
     const isValidProvider = APIKEY_PROVIDERS[provider] ||
@@ -164,6 +178,14 @@ export async function POST(request) {
 
     if (proxyPoolId !== null) {
       mergedProviderSpecificData.proxyPoolId = proxyPoolId;
+    }
+
+    if (fallbackResult.fallbackIds !== null) {
+      // Filter out duplicates with primary proxy pool
+      const filtered = fallbackResult.fallbackIds.filter(id => id !== proxyPoolId);
+      if (filtered.length > 0) {
+        mergedProviderSpecificData.proxyPoolFallbackIds = filtered;
+      }
     }
 
     const newConnection = await createProviderConnection({
