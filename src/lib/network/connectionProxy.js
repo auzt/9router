@@ -69,9 +69,9 @@ export async function resolveConnectionProxyConfig(providerSpecificData = {}) {
           const noProxy = normalizeString(proxyPool.noProxy);
           const strictProxy = proxyPool.strictProxy === true;
 
-          if (proxyPool.type === "vercel") {
+          if (proxyPool.type === "vercel" || proxyPool.type === "cloudflare" || proxyPool.type === "deno") {
             return {
-              source: "pool-vercel",
+              source: proxyPool.type,
               proxyPoolId,
               proxyPool,
               connectionProxyEnabled: false,
@@ -174,7 +174,7 @@ async function resolveSinglePoolConfig(poolId) {
   const noProxy = normalizeString(proxyPool.noProxy);
   const strictProxy = proxyPool.strictProxy === true;
 
-  if (proxyPool.type === "vercel") {
+  if (proxyPool.type === "vercel" || proxyPool.type === "cloudflare" || proxyPool.type === "deno") {
     return {
       poolId: id,
       connectionProxyEnabled: false,
