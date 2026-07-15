@@ -1,12 +1,17 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import PropTypes from "prop-types";
 import Card from "./Card";
 import Select from "./Select";
 import Badge from "./Badge";
 
 const NONE_PROXY_POOL_VALUE = "__none__";
+const STRATEGIES = [
+  { value: "none", label: "None (single pool)" },
+  { value: "round-robin", label: "Round-robin" },
+  { value: "random", label: "Random" },
+];
 
 export default function NoAuthProxyCard({ providerId }) {
   const [proxyPools, setProxyPools] = useState([]);
@@ -88,6 +93,11 @@ export default function NoAuthProxyCard({ providerId }) {
     } finally {
       setSaving(false);
     }
+  }, [providerId]);
+
+  const handlePoolChange = (newPoolId) => {
+    setProxyPoolId(newPoolId);
+    save(newPoolId, rotateStrategy);
   };
 
   const fallbackEligiblePools = (proxyPools || []).filter(p => p.id !== proxyPoolId);

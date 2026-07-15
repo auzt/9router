@@ -8,13 +8,15 @@ import {
   isTunnelManuallyDisabled, isTunnelReconnecting, isTailscaleReconnecting,
   getTunnelService, getTailscaleService, setTunnelUnexpectedExitCallback,
   killCloudflared, isCloudflaredRunning, ensureCloudflared,
-  isTailscaleRunning, isTailscaleRunningStrict,
+  isTailscaleRunning, isTailscaleRunningStrict, isDaemonAlive, startFunnel,
   checkInternet,
   RESTART_COOLDOWN_MS, NETWORK_SETTLE_MS,
   WATCHDOG_INTERVAL_MS, NETWORK_CHECK_INTERVAL_MS, VIRTUAL_IFACE_REGEX,
 } from "@/lib/tunnel";
 import { getMitmStatus, startMitm, loadEncryptedPassword, initDbHooks, restoreToolDNS, removeAllDNSEntriesSync } from "@/mitm/manager";
+import { startQuotaAutoPing } from "@/shared/services/quotaAutoPing";
 import { syncToJson as syncMitmAliasCache } from "@/lib/mitmAliasCache";
+import { killAllBridges } from "@/lib/mcp/stdioSseBridge";
 
 // Inject correct paths and DB hooks into manager.js (CJS) from ESM context
 (function bootstrapMitm() {
@@ -31,6 +33,10 @@ import { syncToJson as syncMitmAliasCache } from "@/lib/mitmAliasCache";
 
 process.setMaxListeners(20);
 
+// Defer heavy startup work so the first HTTP request (login → dashboard) isn't
+// starved by DB cleanup, cloudflared download, lsof/DNS probes and OAuth pings.
+const STARTUP_DEFER_MS = 3000;
+
 // Survive Next.js hot reload
 const g = global.__appSingleton ??= {
   signalHandlersRegistered: false,
@@ -46,26 +52,12 @@ const g = global.__appSingleton ??= {
 
 export async function initializeApp() {
   try {
-    await cleanupProviderConnections();
-    const settings = await getSettings();
-
-    // Auto-resume tunnel (once per process)
-    if (settings.tunnelEnabled && !g.tunnelAutoResumed) {
-      g.tunnelAutoResumed = true;
-      console.log("[InitApp] Tunnel was enabled, auto-resuming...");
-      safeRestartTunnel("startup").catch((e) => console.log("[InitApp] Tunnel resume failed:", e.message));
-    }
-
-    // Auto-resume tailscale (once per process)
-    if (settings.tailscaleEnabled && !g.tailscaleAutoResumed) {
-      g.tailscaleAutoResumed = true;
-      console.log("[InitApp] Tailscale was enabled, auto-resuming...");
-      safeRestartTailscale("startup").catch((e) => console.log("[InitApp] Tailscale resume failed:", e.message));
-    }
-
+    // Register cleanup + exit-respawn callback immediately so signals and
+    // unexpected cloudflared exits are handled even during the deferred window.
     if (!g.signalHandlersRegistered) {
       const cleanup = () => {
         try { removeAllDNSEntriesSync(); } catch { /* best effort */ }
+        try { killAllBridges(); } catch { /* best effort */ }
         killCloudflared();
         process.exit();
       };
@@ -75,22 +67,46 @@ export async function initializeApp() {
       g.signalHandlersRegistered = true;
     }
 
-    ensureCloudflared().catch(() => {});
-
-    // Sync mitmAlias DB → JSON cache so standalone MITM server can read it
-    syncMitmAliasCache().catch(() => {});
-
-    // Auto-respawn tunnel when cloudflared exits unexpectedly (e.g. network change drop)
     setTunnelUnexpectedExitCallback(() => {
       safeRestartTunnel("unexpected-exit").catch(() => {});
     });
 
-    startWatchdog();
-    startNetworkMonitor();
-    autoStartMitm();
+    // Defer the heavy work — nothing here blocks incoming requests.
+    setTimeout(() => {
+      runHeavyStartup().catch((e) => console.error("[InitApp] deferred startup failed:", e.message));
+    }, STARTUP_DEFER_MS);
   } catch (error) {
     console.error("[InitApp] Error:", error);
   }
+}
+
+async function runHeavyStartup() {
+  await cleanupProviderConnections();
+  const settings = await getSettings();
+
+  // Auto-resume tunnel (once per process)
+  if (settings.tunnelEnabled && !g.tunnelAutoResumed) {
+    g.tunnelAutoResumed = true;
+    console.log("[InitApp] Tunnel was enabled, auto-resuming...");
+    safeRestartTunnel("startup").catch((e) => console.log("[InitApp] Tunnel resume failed:", e.message));
+  }
+
+  // Auto-resume tailscale (once per process)
+  if (settings.tailscaleEnabled && !g.tailscaleAutoResumed) {
+    g.tailscaleAutoResumed = true;
+    console.log("[InitApp] Tailscale was enabled, auto-resuming...");
+    safeRestartTailscale("startup").catch((e) => console.log("[InitApp] Tailscale resume failed:", e.message));
+  }
+
+  ensureCloudflared().catch(() => {});
+
+  // Sync mitmAlias DB → JSON cache so standalone MITM server can read it
+  syncMitmAliasCache().catch(() => {});
+
+  startWatchdog();
+  startNetworkMonitor();
+  autoStartMitm();
+  startQuotaAutoPing();
 }
 
 async function autoStartMitm() {
@@ -173,8 +189,20 @@ async function safeRestartTailscale(reason) {
 
   // Tailscale daemon is OS-level with built-in reconnect; trust it when running (even on netchange).
   // Startup uses strict probe — cached state is cold after process/dev reload.
-  const running = reason === "startup" ? isTailscaleRunningStrict() : isTailscaleRunning();
+  const running = reason === "startup" ? await isTailscaleRunningStrict() : isTailscaleRunning();
   if (running) return;
+
+  // Daemon alive but funnel dropped → recover funnel only; never full-restart (preserves login/daemon).
+  if (isDaemonAlive() && svc.activeLocalPort) {
+    try {
+      await startFunnel(svc.activeLocalPort);
+      svc.lastRestartAt = Date.now();
+      console.log("[Tailscale] funnel re-established (daemon alive)");
+    } catch (err) {
+      console.log("[Tailscale] funnel recovery failed:", err.message);
+    }
+    return;
+  }
 
   const force = FORCE_RESTART_REASONS.test(reason);
   if (!force && Date.now() - svc.lastRestartAt < RESTART_COOLDOWN_MS) {
